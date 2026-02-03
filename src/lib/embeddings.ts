@@ -45,17 +45,12 @@ export async function generateEmbeddings(texts: string[]): Promise<number[][]> {
 
   const openai = getOpenAI();
 
-  // OpenAI allows up to 2048 inputs per request, but we'll batch conservatively
-  const BATCH_SIZE = 100;
-  const BATCH_DELAY_MS = 100; // Delay between batches to avoid rate limits
+  // OpenAI allows up to 2048 inputs per request
+  // Using 1000 to balance speed vs memory usage
+  const BATCH_SIZE = 1000;
   const allEmbeddings: number[][] = [];
 
   for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-    // Add delay between batches (not before the first batch)
-    if (i > 0) {
-      await new Promise((resolve) => setTimeout(resolve, BATCH_DELAY_MS));
-    }
-
     const batch = texts.slice(i, i + BATCH_SIZE);
 
     const response = await openai.embeddings.create({
