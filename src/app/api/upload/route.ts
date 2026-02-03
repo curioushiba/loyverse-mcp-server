@@ -5,6 +5,12 @@ import { insertChunks, deleteByFilename } from "@/lib/rag";
 import { DocumentChunk } from "@/lib/mongodb";
 import { RESTAURANTS, Restaurant } from "@/lib/loyverse";
 
+/**
+ * CSV type categories:
+ * - products: Product catalog exports (items, prices, costs)
+ * - sales: Both receipt-level transactions AND item sales summaries
+ * - inventory: Stock level reports
+ */
 type CsvType = "products" | "sales" | "inventory";
 
 const MAX_FILE_SIZE_MB = 10;
@@ -16,8 +22,13 @@ const MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024;
 function detectCsvType(headers: string[]): CsvType | null {
   const h = new Set(headers.map((col) => col.toLowerCase().trim().replace(/\s+/g, "_")));
 
-  // Sales: receipt_number, payment_type, total_money
-  if (h.has("receipt_number") || h.has("payment_type") || h.has("total_money")) {
+  // Sales: receipt-level OR summary reports
+  // Receipt-level: receipt_number, payment_type, total_money
+  // Summary reports: gross_sales, net_sales, items_sold
+  if (
+    h.has("receipt_number") || h.has("payment_type") || h.has("total_money") ||
+    h.has("gross_sales") || h.has("net_sales") || h.has("items_sold")
+  ) {
     return "sales";
   }
 
@@ -65,15 +76,30 @@ function rowToText(
     }
 
     case "sales": {
+      // Common fields (used by both receipt-level and summary reports)
       if (row.receipt_number) parts.push(`Receipt: ${row.receipt_number}`);
       if (row.date || row.created_at) parts.push(`Date: ${row.date || row.created_at}`);
       const total = formatCurrency(row.total || row.total_money);
       if (total) parts.push(`Total: ${total}`);
       if (row.payment_type) parts.push(`Payment: ${row.payment_type}`);
-      if (row.item_name) parts.push(`Item: ${row.item_name}`);
+      if (row.item_name || row.name) parts.push(`Item: ${row.item_name || row.name}`);
       if (row.quantity) parts.push(`Qty: ${row.quantity}`);
       if (row.employee) parts.push(`Employee: ${row.employee}`);
       if (row.store) parts.push(`Store: ${row.store}`);
+      // Summary report fields
+      if (row.sku) parts.push(`SKU: ${row.sku}`);
+      if (row.category) parts.push(`Category: ${row.category}`);
+      if (row.items_sold) parts.push(`Items Sold: ${row.items_sold}`);
+      const grossSales = formatCurrency(row.gross_sales);
+      if (grossSales) parts.push(`Gross Sales: ${grossSales}`);
+      const netSales = formatCurrency(row.net_sales);
+      if (netSales) parts.push(`Net Sales: ${netSales}`);
+      const grossProfit = formatCurrency(row.gross_profit);
+      if (grossProfit) parts.push(`Gross Profit: ${grossProfit}`);
+      const refunds = formatCurrency(row.refunds);
+      if (refunds) parts.push(`Refunds: ${refunds}`);
+      const discounts = formatCurrency(row.discounts);
+      if (discounts) parts.push(`Discounts: ${discounts}`);
       break;
     }
 
@@ -153,7 +179,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "Could not detect CSV type. Expected columns for products (price + cost or category), sales (receipt_number, payment_type, or total_money), or inventory (in_stock, low_stock_level, or stock).",
+            "Could not detect CSV type. Expected columns for products (price + cost or category), sales (receipt_number, payment_type, total_money, gross_sales, net_sales, or items_sold), or inventory (in_stock, low_stock_level, or stock).",
         },
         { status: 400 }
       );
