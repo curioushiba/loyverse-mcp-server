@@ -10,11 +10,11 @@ const RESTAURANTS = [
   { value: "harveys_chicken", label: "Harvey's Chicken" },
 ];
 
-const CSV_TYPES = [
-  { value: "products", label: "Products / Menu Items" },
-  { value: "sales", label: "Sales / Receipts" },
-  { value: "inventory", label: "Inventory / Stock" },
-];
+const CSV_TYPE_LABELS: Record<string, string> = {
+  products: "Products / Menu Items",
+  sales: "Sales / Receipts",
+  inventory: "Inventory / Stock",
+};
 
 interface UploadResult {
   success?: boolean;
@@ -24,6 +24,7 @@ interface UploadResult {
     filename: string;
     restaurant: string;
     csv_type: string;
+    csv_type_detected?: boolean;
     rows_processed: number;
     uploaded_at: string;
   };
@@ -31,7 +32,6 @@ interface UploadResult {
 
 export default function UploadPage() {
   const [restaurant, setRestaurant] = useState("");
-  const [csvType, setCsvType] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [result, setResult] = useState<UploadResult | null>(null);
@@ -44,8 +44,8 @@ export default function UploadPage() {
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!file || !restaurant || !csvType) {
-      setResult({ error: "Please fill in all fields" });
+    if (!file || !restaurant) {
+      setResult({ error: "Please select a restaurant and a file" });
       return;
     }
 
@@ -56,7 +56,6 @@ export default function UploadPage() {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("restaurant", restaurant);
-      formData.append("csvType", csvType);
 
       const response = await fetch("/api/upload", {
         method: "POST",
@@ -107,23 +106,6 @@ export default function UploadPage() {
           </div>
 
           <div style={styles.field}>
-            <label style={styles.label}>CSV Type</label>
-            <select
-              value={csvType}
-              onChange={(e) => setCsvType(e.target.value)}
-              style={styles.select}
-              disabled={isUploading}
-            >
-              <option value="">Select CSV type...</option>
-              {CSV_TYPES.map((t) => (
-                <option key={t.value} value={t.value}>
-                  {t.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div style={styles.field}>
             <label style={styles.label}>CSV File</label>
             <input
               id="file-input"
@@ -164,7 +146,10 @@ export default function UploadPage() {
                   <ul style={styles.detailsList}>
                     <li>File: {result.details.filename}</li>
                     <li>Restaurant: {result.details.restaurant}</li>
-                    <li>Type: {result.details.csv_type}</li>
+                    <li>
+                      Type: {CSV_TYPE_LABELS[result.details.csv_type] || result.details.csv_type}
+                      {result.details.csv_type_detected && " (auto-detected)"}
+                    </li>
                     <li>Rows: {result.details.rows_processed}</li>
                   </ul>
                 )}

@@ -7,9 +7,32 @@ import { RESTAURANTS, Restaurant } from "@/lib/loyverse";
 
 type CsvType = "products" | "sales" | "inventory";
 
-const VALID_CSV_TYPES: CsvType[] = ["products", "sales", "inventory"];
 const MAX_FILE_SIZE_MB = 10;
 const MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024;
+
+/**
+ * Auto-detect CSV type based on column headers
+ */
+function detectCsvType(headers: string[]): CsvType | null {
+  const h = new Set(headers.map((col) => col.toLowerCase().trim().replace(/\s+/g, "_")));
+
+  // Sales: receipt_number, payment_type, total_money
+  if (h.has("receipt_number") || h.has("payment_type") || h.has("total_money")) {
+    return "sales";
+  }
+
+  // Inventory: in_stock, low_stock_level, or stock without price
+  if (h.has("in_stock") || h.has("low_stock_level") || (h.has("stock") && !h.has("price"))) {
+    return "inventory";
+  }
+
+  // Products: price + cost, or price + category
+  if (h.has("price") && (h.has("cost") || h.has("category"))) {
+    return "products";
+  }
+
+  return null; // Unknown
+}
 
 function formatCurrency(value: string): string | null {
   const num = parseFloat(value);
@@ -80,7 +103,6 @@ export async function POST(request: NextRequest) {
     const formData = await request.formData();
     const file = formData.get("file") as File | null;
     const restaurant = formData.get("restaurant") as string | null;
-    const csvType = formData.get("csvType") as string | null;
 
     // Validate inputs
     if (!file) {
@@ -102,19 +124,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!csvType || !VALID_CSV_TYPES.includes(csvType as CsvType)) {
-      return NextResponse.json(
-        { error: `Invalid CSV type. Must be one of: ${VALID_CSV_TYPES.join(", ")}` },
-        { status: 400 }
-      );
-    }
-
     // Read file content
     const fileContent = await file.text();
     const filename = file.name;
-
-    // Delete existing entries for this file (allows re-uploading)
-    await deleteByFilename(filename);
 
     // Parse CSV
     const parseResult = Papa.parse<Record<string, string>>(fileContent, {
@@ -133,10 +145,27 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "CSV file is empty or has no data rows" }, { status: 400 });
     }
 
+    // Auto-detect CSV type from headers
+    const headers = parseResult.meta.fields || [];
+    const csvType = detectCsvType(headers);
+
+    if (!csvType) {
+      return NextResponse.json(
+        {
+          error:
+            "Could not detect CSV type. Expected columns for products (price + cost or category), sales (receipt_number, payment_type, or total_money), or inventory (in_stock, low_stock_level, or stock).",
+        },
+        { status: 400 }
+      );
+    }
+
+    // Delete existing entries for this file (allows re-uploading)
+    await deleteByFilename(filename);
+
     // Convert rows to text chunks
     const uploadedAt = new Date().toISOString();
     const texts = rows.map((row, index) => ({
-      text: rowToText(row, csvType as CsvType, restaurant),
+      text: rowToText(row, csvType, restaurant),
       rowIndex: index,
     }));
 
@@ -166,6 +195,7 @@ export async function POST(request: NextRequest) {
         filename,
         restaurant,
         csv_type: csvType,
+        csv_type_detected: true,
         rows_processed: insertedCount,
         uploaded_at: uploadedAt,
       },
