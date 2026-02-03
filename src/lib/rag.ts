@@ -75,13 +75,16 @@ export interface DocumentSummary {
 // ============================================================================
 
 const MONGODB_URI_KEY = "MONGODB_URI";
+const OPENAI_API_KEY = "OPENAI_API_KEY";
 const DB_NAME = "loyverse_rag";
 const CHUNKS_COLLECTION = "chunks";
 const DOCUMENTS_COLLECTION = "documents";
 
-// Embedding configuration
-const EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
-const EMBEDDING_DIMENSIONS = 384;
+// Embedding configuration (OpenAI text-embedding-3-small)
+// Cost: ~$0.02 per 1M tokens - very affordable!
+const OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
+const OPENAI_EMBEDDING_URL = "https://api.openai.com/v1/embeddings";
+const EMBEDDING_DIMENSIONS = 1536;
 
 // Search configuration
 const RRF_K = 60; // Reciprocal Rank Fusion constant
@@ -141,65 +144,78 @@ async function getDocumentsCollection(): Promise<Collection<StoredDocument>> {
 }
 
 export function isRAGConfigured(): boolean {
-  return !!process.env[MONGODB_URI_KEY];
+  return !!process.env[MONGODB_URI_KEY] && !!process.env[OPENAI_API_KEY];
 }
 
 // ============================================================================
-// Embedding Generation (Local - No API Cost!)
+// Embedding Generation (OpenAI API - fast, cheap, high quality)
 // ============================================================================
 
-// Dynamic import for transformers (ESM module)
-let pipeline: any = null;
-let embedder: any = null;
-
-async function getEmbedder() {
-  if (embedder) {
-    return embedder;
+function getOpenAIKey(): string {
+  const key = process.env[OPENAI_API_KEY];
+  if (!key) {
+    throw new Error(
+      `Missing environment variable: ${OPENAI_API_KEY}. ` +
+      `Get your API key from https://platform.openai.com/api-keys`
+    );
   }
+  return key;
+}
 
-  if (!pipeline) {
-    // Dynamic import for ESM compatibility
-    const transformers = await import("@huggingface/transformers");
-    pipeline = transformers.pipeline;
-  }
-
-  embedder = await pipeline("feature-extraction", EMBEDDING_MODEL, {
-    // Use CPU for serverless compatibility
-    device: "cpu",
-  });
-
-  return embedder;
+export function isEmbeddingsConfigured(): boolean {
+  return !!process.env[OPENAI_API_KEY];
 }
 
 export async function generateEmbedding(text: string): Promise<number[]> {
-  const embed = await getEmbedder();
-  const result = await embed(text, {
-    pooling: "mean",
-    normalize: true
+  const apiKey = getOpenAIKey();
+
+  const response = await fetch(OPENAI_EMBEDDING_URL, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: OPENAI_EMBEDDING_MODEL,
+      input: text,
+    }),
   });
 
-  // Convert to regular array
-  return Array.from(result.data as Float32Array);
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`OpenAI embedding error (${response.status}): ${errorText}`);
+  }
+
+  const json = await response.json();
+  return json.data[0].embedding;
 }
 
 async function generateBatchEmbeddings(texts: string[]): Promise<number[][]> {
-  const embed = await getEmbedder();
-  const embeddings: number[][] = [];
+  const apiKey = getOpenAIKey();
 
-  // Process in batches to avoid memory issues
-  const batchSize = 10;
-  for (let i = 0; i < texts.length; i += batchSize) {
-    const batch = texts.slice(i, i + batchSize);
-    for (const text of batch) {
-      const result = await embed(text, {
-        pooling: "mean",
-        normalize: true
-      });
-      embeddings.push(Array.from(result.data as Float32Array));
-    }
+  // OpenAI supports batch embeddings in a single request (up to 2048 inputs)
+  const response = await fetch(OPENAI_EMBEDDING_URL, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: OPENAI_EMBEDDING_MODEL,
+      input: texts,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`OpenAI embedding error (${response.status}): ${errorText}`);
   }
 
-  return embeddings;
+  const json = await response.json();
+
+  // Sort by index to ensure correct order
+  const sorted = json.data.sort((a: any, b: any) => a.index - b.index);
+  return sorted.map((item: any) => item.embedding);
 }
 
 // ============================================================================

@@ -21,7 +21,7 @@ You need to create **two indexes** on the `chunks` collection.
 
 ## Step 1: Create the Vector Search Index
 
-This index enables semantic search using 384-dimensional embeddings.
+This index enables semantic search using 1536-dimensional OpenAI embeddings.
 
 ### Using MongoDB Atlas UI
 
@@ -39,7 +39,7 @@ This index enables semantic search using 384-dimensional embeddings.
     {
       "type": "vector",
       "path": "embedding",
-      "numDimensions": 384,
+      "numDimensions": 1536,
       "similarity": "cosine"
     },
     {
@@ -66,7 +66,7 @@ db.getSiblingDB("loyverse_rag").runCommand({
         {
           type: "vector",
           path: "embedding",
-          numDimensions: 384,
+          numDimensions: 1536,
           similarity: "cosine"
         },
         {
