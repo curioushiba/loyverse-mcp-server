@@ -10,6 +10,7 @@ import {
   formatCurrency,
   formatDate,
 } from "@/lib/loyverse";
+import { hybridSearch, listDocuments, deleteByFilename } from "@/lib/rag";
 
 const restaurantSchema = z.enum([
   "harveys_wings",
@@ -696,6 +697,179 @@ const handler = createMcpHandler(
         text += `- **Avg per Restaurant:** ${formatCurrency(grandTotal / results.length)}\n`;
 
         return { content: [{ type: "text", text }] };
+      }
+    );
+
+    // ============================================
+    // RAG Knowledge Base Tools
+    // ============================================
+
+    // Tool 13: RAG Search
+    server.registerTool(
+      "rag_search",
+      {
+        title: "Search Knowledge Base",
+        description:
+          "Search uploaded CSV data using hybrid vector + text search. Returns relevant chunks from products, sales, or inventory data.",
+        inputSchema: {
+          query: z.string().describe("Search query (e.g., 'ramen dishes', 'highest selling items')"),
+          restaurant: restaurantSchema
+            .optional()
+            .describe("Filter by restaurant (optional)"),
+          csv_type: z
+            .enum(["products", "sales", "inventory"])
+            .optional()
+            .describe("Filter by CSV type (optional)"),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(20)
+            .optional()
+            .describe("Max results to return (default 10)"),
+        },
+      },
+      async ({ query, restaurant, csv_type, limit }) => {
+        try {
+          const results = await hybridSearch(
+            query,
+            {
+              restaurant: restaurant as string | undefined,
+              csv_type: csv_type as "products" | "sales" | "inventory" | undefined,
+            },
+            limit || 10
+          );
+
+          if (results.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `## Knowledge Base Search Results\n\nNo results found for "${query}".\n\nTip: Make sure you have uploaded CSV files at /upload first.`,
+                },
+              ],
+            };
+          }
+
+          let text = `## Knowledge Base Search Results\n\n`;
+          text += `**Query:** "${query}"\n`;
+          text += `**Results:** ${results.length}\n\n`;
+
+          for (let i = 0; i < results.length; i++) {
+            const result = results[i];
+            const restaurantName = result.metadata.restaurant
+              .replace(/_/g, " ")
+              .replace(/\b\w/g, (c) => c.toUpperCase());
+
+            text += `### ${i + 1}. ${restaurantName} (${result.metadata.csv_type})\n`;
+            text += `${result.text}\n`;
+            text += `*Source: ${result.metadata.filename}, row ${result.metadata.row_index + 1}*\n\n`;
+          }
+
+          return { content: [{ type: "text", text }] };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          return {
+            content: [
+              {
+                type: "text",
+                text: `## Knowledge Base Search Error\n\nFailed to search: ${message}\n\nMake sure MongoDB is connected and indexes are configured.`,
+              },
+            ],
+          };
+        }
+      }
+    );
+
+    // Tool 14: List RAG Documents
+    server.registerTool(
+      "rag_list_documents",
+      {
+        title: "List Knowledge Base Documents",
+        description:
+          "List all uploaded CSV files in the knowledge base with their metadata.",
+        inputSchema: {},
+      },
+      async () => {
+        try {
+          const documents = await listDocuments();
+
+          if (documents.length === 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `## Knowledge Base Documents\n\nNo documents uploaded yet.\n\nTo upload CSV files, visit /upload in your browser.`,
+                },
+              ],
+            };
+          }
+
+          let text = `## Knowledge Base Documents\n\n`;
+          text += `Found ${documents.length} uploaded file(s).\n\n`;
+          text += `| Filename | Restaurant | Type | Rows | Uploaded |\n`;
+          text += `|----------|------------|------|------|----------|\n`;
+
+          for (const doc of documents) {
+            const restaurantName = doc.restaurant
+              .replace(/_/g, " ")
+              .replace(/\b\w/g, (c) => c.toUpperCase());
+            const uploadDate = new Date(doc.uploaded_at).toLocaleDateString();
+            text += `| ${doc.filename} | ${restaurantName} | ${doc.csv_type} | ${doc.row_count} | ${uploadDate} |\n`;
+          }
+
+          return { content: [{ type: "text", text }] };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          return {
+            content: [
+              {
+                type: "text",
+                text: `## Knowledge Base Error\n\nFailed to list documents: ${message}\n\nMake sure MongoDB is connected.`,
+              },
+            ],
+          };
+        }
+      }
+    );
+
+    // Tool 15: Delete RAG Document
+    server.registerTool(
+      "rag_delete_document",
+      {
+        title: "Delete Knowledge Base Document",
+        description:
+          "Delete all chunks for a specific uploaded CSV file from the knowledge base. This is a destructive operation.",
+        inputSchema: {
+          filename: z.string().describe("The filename to delete (e.g., 'products.csv')"),
+        },
+      },
+      async ({ filename }) => {
+        try {
+          const deletedCount = await deleteByFilename(filename);
+
+          let text = `## Delete Document Result\n\n`;
+
+          if (deletedCount === 0) {
+            text += `No document found with filename "${filename}".\n\n`;
+            text += `Use \`rag_list_documents\` to see available files.`;
+          } else {
+            text += `Successfully deleted **${filename}**.\n`;
+            text += `- Removed ${deletedCount} chunks from the knowledge base.`;
+          }
+
+          return { content: [{ type: "text", text }] };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          return {
+            content: [
+              {
+                type: "text",
+                text: `## Delete Error\n\nFailed to delete document: ${message}`,
+              },
+            ],
+          };
+        }
       }
     );
   },
