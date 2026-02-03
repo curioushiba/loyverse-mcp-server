@@ -10,6 +10,15 @@ import {
   formatCurrency,
   formatDate,
 } from "@/lib/loyverse";
+import {
+  isRAGConfigured,
+  hybridSearch,
+  ingestDocument,
+  listDocuments,
+  deleteDocument,
+  getRAGStats,
+  type DocumentType,
+} from "@/lib/rag";
 
 const restaurantSchema = z.enum([
   "harveys_wings",
@@ -17,6 +26,15 @@ const restaurantSchema = z.enum([
   "wildflower",
   "fika",
   "harveys_chicken",
+]);
+
+const documentTypeSchema = z.enum([
+  "menu",
+  "recipe",
+  "sop",
+  "policy",
+  "manual",
+  "other",
 ]);
 
 interface Store {
@@ -696,6 +714,302 @@ const handler = createMcpHandler(
         text += `- **Avg per Restaurant:** ${formatCurrency(grandTotal / results.length)}\n`;
 
         return { content: [{ type: "text", text }] };
+      }
+    );
+
+    // ========================================================================
+    // RAG (Retrieval-Augmented Generation) Tools
+    // ========================================================================
+
+    // Tool 13: RAG Status
+    server.registerTool(
+      "rag_status",
+      {
+        title: "RAG System Status",
+        description:
+          "Check if the RAG knowledge base system is configured and show statistics.",
+        inputSchema: {
+          restaurant: restaurantSchema
+            .optional()
+            .describe("Filter stats by restaurant (optional)"),
+        },
+      },
+      async ({ restaurant }) => {
+        const configured = isRAGConfigured();
+
+        let text = `## RAG Knowledge Base Status\n\n`;
+        text += `**Configured:** ${configured ? "✅ Yes" : "❌ No"}\n\n`;
+
+        if (!configured) {
+          text += `To enable RAG, set the \`MONGODB_URI\` environment variable to your MongoDB Atlas connection string.\n`;
+          return { content: [{ type: "text", text }] };
+        }
+
+        try {
+          const stats = await getRAGStats(restaurant);
+          text += `### Statistics${restaurant ? ` for ${RESTAURANT_DISPLAY_NAMES[restaurant as Restaurant]}` : " (All Restaurants)"}\n\n`;
+          text += `- **Total Documents:** ${stats.totalDocuments}\n`;
+          text += `- **Total Chunks:** ${stats.totalChunks}\n\n`;
+          text += `### Documents by Type\n`;
+          text += `| Type | Count |\n`;
+          text += `|------|-------|\n`;
+          for (const [type, count] of Object.entries(stats.documentsByType)) {
+            if (count > 0) {
+              text += `| ${type} | ${count} |\n`;
+            }
+          }
+        } catch (error) {
+          text += `⚠️ Error fetching stats: ${error instanceof Error ? error.message : "Unknown error"}\n`;
+        }
+
+        return { content: [{ type: "text", text }] };
+      }
+    );
+
+    // Tool 14: Hybrid Search (Semantic + Keyword)
+    server.registerTool(
+      "rag_search",
+      {
+        title: "Search Knowledge Base",
+        description:
+          "Search restaurant documents using hybrid search (semantic + keyword with Reciprocal Rank Fusion). Great for finding SOPs, recipes, policies, and manuals. Works with concepts AND exact terms (part numbers, error codes).",
+        inputSchema: {
+          restaurant: restaurantSchema.describe("Restaurant to search"),
+          query: z
+            .string()
+            .describe(
+              "Search query - can be a question, keywords, part numbers, or error codes"
+            ),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(10)
+            .optional()
+            .describe("Max results (default 5)"),
+        },
+      },
+      async ({ restaurant, query, limit }) => {
+        if (!isRAGConfigured()) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "❌ RAG is not configured. Set the `MONGODB_URI` environment variable.",
+              },
+            ],
+          };
+        }
+
+        try {
+          const results = await hybridSearch(
+            restaurant,
+            query,
+            limit || 5
+          );
+
+          let text = `## Search Results for "${query}"\n\n`;
+          text += `**Restaurant:** ${RESTAURANT_DISPLAY_NAMES[restaurant as Restaurant]}\n`;
+          text += `**Found:** ${results.length} relevant documents\n\n`;
+
+          if (results.length === 0) {
+            text += `No matching documents found. Try:\n`;
+            text += `- Using different keywords\n`;
+            text += `- Adding documents with \`rag_ingest\`\n`;
+          } else {
+            for (const [i, result] of results.entries()) {
+              const sourceIcon =
+                result.source === "both"
+                  ? "🎯"
+                  : result.source === "vector"
+                    ? "🔮"
+                    : "📝";
+              text += `### ${i + 1}. ${result.metadata.title} ${sourceIcon}\n`;
+              text += `**Type:** ${result.metadata.type} | **Match:** ${result.source} | **Score:** ${result.score.toFixed(4)}\n\n`;
+              text += `${result.content}\n\n`;
+              text += `---\n\n`;
+            }
+
+            text += `*Legend: 🎯 Both semantic+keyword | 🔮 Semantic only | 📝 Keyword only*`;
+          }
+
+          return { content: [{ type: "text", text }] };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `❌ Search error: ${error instanceof Error ? error.message : "Unknown error"}`,
+              },
+            ],
+          };
+        }
+      }
+    );
+
+    // Tool 15: Ingest Document
+    server.registerTool(
+      "rag_ingest",
+      {
+        title: "Add Document to Knowledge Base",
+        description:
+          "Add a document (menu, recipe, SOP, policy, manual) to the restaurant knowledge base for RAG search.",
+        inputSchema: {
+          restaurant: restaurantSchema.describe("Restaurant owner of this document"),
+          content: z.string().describe("Full document text content"),
+          title: z.string().describe("Document title"),
+          type: documentTypeSchema.describe(
+            "Document type: menu, recipe, sop, policy, manual, or other"
+          ),
+          tags: z
+            .array(z.string())
+            .optional()
+            .describe("Optional tags for categorization"),
+        },
+      },
+      async ({ restaurant, content, title, type, tags }) => {
+        if (!isRAGConfigured()) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "❌ RAG is not configured. Set the `MONGODB_URI` environment variable.",
+              },
+            ],
+          };
+        }
+
+        try {
+          const result = await ingestDocument(
+            restaurant,
+            content,
+            { title, type: type as DocumentType, tags }
+          );
+
+          let text = `## ✅ Document Added to Knowledge Base\n\n`;
+          text += `- **Title:** ${result.title}\n`;
+          text += `- **Type:** ${type}\n`;
+          text += `- **Restaurant:** ${RESTAURANT_DISPLAY_NAMES[restaurant as Restaurant]}\n`;
+          text += `- **Document ID:** \`${result.documentId}\`\n`;
+          text += `- **Chunks Created:** ${result.chunksCreated}\n\n`;
+          text += `The document is now searchable via \`rag_search\`.`;
+
+          return { content: [{ type: "text", text }] };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `❌ Ingestion error: ${error instanceof Error ? error.message : "Unknown error"}`,
+              },
+            ],
+          };
+        }
+      }
+    );
+
+    // Tool 16: List Documents
+    server.registerTool(
+      "rag_list_documents",
+      {
+        title: "List Knowledge Base Documents",
+        description: "List all documents in a restaurant's knowledge base.",
+        inputSchema: {
+          restaurant: restaurantSchema.describe("Restaurant identifier"),
+        },
+      },
+      async ({ restaurant }) => {
+        if (!isRAGConfigured()) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "❌ RAG is not configured. Set the `MONGODB_URI` environment variable.",
+              },
+            ],
+          };
+        }
+
+        try {
+          const docs = await listDocuments(restaurant);
+
+          let text = `## Knowledge Base for ${RESTAURANT_DISPLAY_NAMES[restaurant as Restaurant]}\n\n`;
+          text += `**Total Documents:** ${docs.length}\n\n`;
+
+          if (docs.length === 0) {
+            text += `No documents found. Use \`rag_ingest\` to add documents.`;
+          } else {
+            text += `| Title | Type | Chunks | Created |\n`;
+            text += `|-------|------|--------|--------|\n`;
+            for (const doc of docs) {
+              const created = doc.created_at.toLocaleDateString();
+              text += `| ${doc.title} | ${doc.type} | ${doc.chunk_count} | ${created} |\n`;
+            }
+            text += `\n*Use \`rag_delete\` with the document title to remove a document.*`;
+          }
+
+          return { content: [{ type: "text", text }] };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `❌ Error listing documents: ${error instanceof Error ? error.message : "Unknown error"}`,
+              },
+            ],
+          };
+        }
+      }
+    );
+
+    // Tool 17: Delete Document
+    server.registerTool(
+      "rag_delete",
+      {
+        title: "Delete Document from Knowledge Base",
+        description: "Remove a document from the restaurant's knowledge base.",
+        inputSchema: {
+          restaurant: restaurantSchema.describe("Restaurant identifier"),
+          document_id: z.string().describe("Document ID to delete (from rag_list_documents)"),
+        },
+      },
+      async ({ restaurant, document_id }) => {
+        if (!isRAGConfigured()) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "❌ RAG is not configured. Set the `MONGODB_URI` environment variable.",
+              },
+            ],
+          };
+        }
+
+        try {
+          const result = await deleteDocument(restaurant, document_id);
+
+          let text: string;
+          if (result.documentDeleted) {
+            text = `## ✅ Document Deleted\n\n`;
+            text += `- **Document ID:** \`${document_id}\`\n`;
+            text += `- **Chunks Removed:** ${result.chunksDeleted}\n`;
+          } else {
+            text = `## ⚠️ Document Not Found\n\n`;
+            text += `No document with ID \`${document_id}\` found for ${RESTAURANT_DISPLAY_NAMES[restaurant as Restaurant]}.\n`;
+            text += `Use \`rag_list_documents\` to see available documents.`;
+          }
+
+          return { content: [{ type: "text", text }] };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `❌ Delete error: ${error instanceof Error ? error.message : "Unknown error"}`,
+              },
+            ],
+          };
+        }
       }
     );
   },
